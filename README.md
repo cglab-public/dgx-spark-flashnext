@@ -1,4 +1,4 @@
-# Serving Qwen3.8-Flash-Next (NVFP4) on DGX Spark — GB10 / sm_121
+# Serving Qwen3.8-Flash-Next (NVFP4) on DGX Spark - GB10 / sm_121
 
 Field notes from getting `Qwen3.8-Flash-Next` serving correctly on a pair of
 NVIDIA DGX Sparks (GB10, sm_121) with SGLang, TP=2.
@@ -6,17 +6,17 @@ NVIDIA DGX Sparks (GB10, sm_121) with SGLang, TP=2.
 **The short version:** the vendor recipe boots on GB10 and then silently produces
 garbage past a certain context depth. The fix is a working sparse-decode kernel;
 no combination of stock flags is sufficient. The rest of this document is how we
-found that, and the traps between here and there — because the failure is silent,
+found that, and the traps between here and there - because the failure is silent,
 and every obvious way of checking for it will tell you the server is fine.
 
-> ### Correction — 2026-08-28
+> ### Correction - 2026-08-28
 >
 > **An earlier version of this document said `--attention-backend flashinfer`
 > alone was sufficient for correctness. That was wrong.** The flag is necessary
 > but it does not remove QSA from the path: the boot log still reads
 > `Using QSA for sparse full-attention layers`, because the flag only swaps the
-> dense backend that QSA *wraps*. With the trtllm-gen gate patch still in place —
-> which that version also told you to apply, in order to boot at all — the
+> dense backend that QSA *wraps*. With the trtllm-gen gate patch still in place -
+> which that version also told you to apply, in order to boot at all - the
 > silently-wrong sparse decode remains live, and the `!!!!` collapse returns at
 > depth.
 >
@@ -78,7 +78,7 @@ accept len: 1.00, accept rate: 0.00
 ```
 
 The MTP draft head proposes plausible tokens, the target argmaxes to 0, so nothing
-ever matches — forever. Healthy is roughly `accept rate 0.4-0.8`. Watch it with:
+ever matches - forever. Healthy is roughly `accept rate 0.4-0.8`. Watch it with:
 
 ```bash
 docker logs <container> 2>&1 | grep -a "Decode batch" | tail
@@ -95,18 +95,18 @@ of SGLang's sparse-decode kernels works:
 | sparse decode path | behaviour on sm_121 |
 |---|---|
 | trtllm-gen (gated to sm_100 by `is_sm100_supported()`) | boots if you force the gate open, then silently emits token 0 at depth |
-| FA4-CuTe packed varlen (the non-sm100 fallback) | fails MLIR codegen at boot — a 2D layout sliced with a 3D coord |
+| FA4-CuTe packed varlen (the non-sm100 fallback) | fails MLIR codegen at boot - a 2D layout sliced with a 3D coord |
 
 Forcing the gate open is a popular workaround. **It trades a loud failure for a
 silent one**, which is strictly worse. Kernel-level validation at short shapes
-(e.g. `kv=[2051,2,256]`) passes cleanly and cannot see this — the sparse path is
+(e.g. `kv=[2051,2,256]`) passes cleanly and cannot see this - the sparse path is
 not engaged at that length.
 
 Related upstream: sgl-project/sglang#36558.
 
 We previously wrote that the gate patch is "required to boot at all". That is true
 only if the *other* path is left broken. Repair the FA4-CuTe fallback instead (§3)
-and the server boots with the gate untouched — which is the cleanest evidence that
+and the server boots with the gate untouched - which is the cleanest evidence that
 forcing it open was never necessary, only convenient.
 
 ### What does not work
@@ -127,10 +127,10 @@ fallback rather than un-gate the one NVIDIA disabled. MiaAI-Lab did exactly this
 they leave `is_sm100_supported()` gated off and give
 `_resolve_flash_attn_varlen_func` a Triton varlen kernel that works on GB10.
 
-> **Credit:** the kernel fix is theirs, not ours —
+> **Credit:** the kernel fix is theirs, not ours -
 > <https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks>
 
-Measured here at 210k context, NEXTN on, every other flag identical — the image is
+Measured here at 210k context, NEXTN on, every other flag identical - the image is
 the only variable:
 
 | sparse decode | result at 210k | accept rate | decode |
@@ -140,12 +140,12 @@ the only variable:
 
 It is correct *and* faster: a correct kernel drafts correctly, so the speculative
 accept rate rises from 0.72 to 0.90. Their image also boots **without** the gate
-patch, which stock cannot — direct confirmation that the fallback path is genuinely
+patch, which stock cannot - direct confirmation that the fallback path is genuinely
 repaired rather than bypassed.
 
 ### Still keep `--attention-backend flashinfer`
 
-It remains necessary — `--decode-attention-backend flashinfer` overrides decode
+It remains necessary - `--decode-attention-backend flashinfer` overrides decode
 only and leaves **prefill on QSA**; that configuration passes short probes and then
 degrades in real use. Use the global flag. It is just no longer *sufficient*.
 
@@ -161,7 +161,7 @@ Recorded so nobody repeats them. All still collapse at 210k:
 | `--speculative-algorithm none` | clean, but costs 2.5x decode (43 -> 17.5 tok/s) |
 
 Note the TileLang boot-time warning `Data race detected: Logits(bx, position)` is a
-red herring — it is present on healthy and collapsing builds alike.
+red herring - it is present on healthy and collapsing builds alike.
 
 ### Do not add `--mamba-full-memory-ratio`
 
@@ -180,11 +180,11 @@ so the trade is backwards. Measured at 12 concurrent sessions, 70k context each:
 | worst-session median | **14.10s** | 54.84s |
 
 Same hardware, same model, one flag. Check the two allocation lines at boot and
-size for whichever pool binds first — for this model that is KV.
+size for whichever pool binds first - for this model that is KV.
 
 ### Working configuration
 
-Run it on an image carrying the Triton QSA fallback (§3) — build it from the
+Run it on an image carrying the Triton QSA fallback (§3) - build it from the
 MiaAI-Lab recipe. On the stock image this same command still collapses at depth.
 Do **not** also bind-mount a trtllm-gate patch: it overwrites the very file the
 fix patches and puts the broken kernel back.
@@ -230,7 +230,7 @@ history that transient is **~8-10 GB**. With `--mem-fraction-static 0.90` we had
 8.9 GB free and saw **2/6 collapse at 240k** even on the fixed kernel; at 0.82
 (17.9 GB free) with chunk 1024 the same test is **6/6 clean**.
 
-This diagnosis is MiaAI-Lab's — see "the QSA indexer prefill workspace scales with
+This diagnosis is MiaAI-Lab's - see "the QSA indexer prefill workspace scales with
 `chunk x history`" in their README. Do not raise chunk without profiling the peak
 transient against your free budget.
 
@@ -255,7 +255,7 @@ Do not assume a `!` run means the sparse-decode problem above. There are two:
 Both drop spec accept rate to 0.00 and both emit token 0, so the symptom is
 identical and you cannot tell them apart from the reply alone. Credit to
 [MiaAI-Lab](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks) for
-documenting #36537 — their README is the reason we knew to separate the two.
+documenting #36537 - their README is the reason we knew to separate the two.
 
 To tell them apart, check the session transcript for reasoning content. Our field
 incident carried **none** across 147 assistant turns, so thinking was off and only
@@ -268,7 +268,7 @@ Workaround for #36537, per request (keeps thinking elsewhere):
 ```
 
 **Check what your client actually sends.** The template reads `enable_thinking`
-and silently ignores any other spelling — a client passing `thinking` instead
+and silently ignores any other spelling - a client passing `thinking` instead
 leaves thinking **on** (this model thinks by default) and puts tool-using sessions
 onto #36537 without warning. The failure mode of a key typo here is silent, and in
 the direction of the bug.
@@ -276,7 +276,7 @@ the direction of the bug.
 ### Zero-token replies at the context ceiling
 
 With `--allow-auto-truncate`, a prompt that fills the window returns
-`finish_reason: "length"` with **`completion_tokens: 0`** and empty content — no
+`finish_reason: "length"` with **`completion_tokens: 0`** and empty content - no
 error, no warning. Clients render it as a blank reply. If you do not need
 truncation, leave the flag off so oversized prompts fail loudly instead.
 
@@ -294,12 +294,12 @@ Measured on three coding tasks at `max_tokens 4096`:
 
 | effort | behaviour |
 |---|---|
-| `xhigh` (default) | **bimodal** — on one task it burned the entire 4096-token budget on thinking and returned an **empty `content`**; on two others it thought *less* than `medium` and gave the tersest answers |
+| `xhigh` (default) | **bimodal** - on one task it burned the entire 4096-token budget on thinking and returned an **empty `content`**; on two others it thought *less* than `medium` and gave the tersest answers |
 | `medium` | best behaved, completed every task |
 | `low` | fine, slightly thinner |
 
-`medium` injects **no instruction at all** — the template's `elif` chain has no
-`medium` branch — so it is "the model unsteered", not a midpoint. **Pin it:**
+`medium` injects **no instruction at all** - the template's `elif` chain has no
+`medium` branch - so it is "the model unsteered", not a midpoint. **Pin it:**
 
 ```json
 "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "medium"}
@@ -310,21 +310,21 @@ benchmark a reasoning model against a non-reasoning one without noticing.
 
 **Tool calls use a custom XML form**, converted by `--tool-call-parser
 qwen3_coder`. Without the parser, `tool_calls` is `null` and the raw XML lands in
-`content` — no agent harness will ever see a tool call.
+`content` - no agent harness will ever see a tool call.
 
 ---
 
-## 5. How to verify — this part is not optional
+## 5. How to verify - this part is not optional
 
 **A degraded server keeps returning numbers**, and nothing in the response says
-otherwise — no error, no warning, no failed request. A configuration can pass a
+otherwise - no error, no warning, no failed request. A configuration can pass a
 full probe suite and still break under real load.
 
 Run a canary **before and after** every measurement. A measurement is only valid
 if both pass.
 
 ```python
-# canary.py — exit 0 healthy, 1 degraded
+# canary.py - exit 0 healthy, 1 degraded
 CHECKS = [("2+2, digit only.",              lambda t: "4" in t),
           ("Say the single word: banana",   lambda t: "banana" in t.lower()),
           ("Complete: the capital of France is", lambda t: "paris" in t.lower())]
@@ -333,7 +333,7 @@ CHECKS = [("2+2, digit only.",              lambda t: "4" in t),
 
 Two failure modes it catches that ordinary checks do not:
 
-- `content: ""` with a populated `reasoning_content` — looks like an empty reply,
+- `content: ""` with a populated `reasoning_content` - looks like an empty reply,
   not an error
 - a server that was healthy when you started the run and degraded during it
 
@@ -341,12 +341,12 @@ Two failure modes it catches that ordinary checks do not:
 > collapse is depth-dependent. We have watched this canary pass three for three
 > while the same server collapsed on **100%** of 210k-context requests. A green
 > canary means "not globally wedged"; it says nothing about depth. Probe at the
-> depth your workload actually reaches, and **repeat it** — see below.
+> depth your workload actually reaches, and **repeat it** - see below.
 
 **One sample per configuration is not a measurement.** The collapse is a
 stochastic failure: at 190k it fires on roughly half of attempts, so a single
 clean run is a coin flip you will read as a pass. This is precisely how the
-earlier version of this document shipped a broken recommendation — every rung of
+earlier version of this document shipped a broken recommendation - every rung of
 the matrix was n=1. Use n>=6 per cell and report the rate, not a verdict.
 
 **Probe shape matters more than probe depth.** A single-shot cold prefill and a
@@ -357,7 +357,7 @@ the shape of your actual workload.
 
 Note also that `--decode-attention-backend` overrides only the `full_attention`
 layers. This model has 48 layers of which **36 are `linear_attention`**
-(mamba/GDN), carrying recurrent state across turns — which is why the global
+(mamba/GDN), carrying recurrent state across turns - which is why the global
 `--attention-backend` is the flag that matters.
 
 ---
@@ -366,7 +366,7 @@ layers. This model has 48 layers of which **36 are `linear_attention`**
 
 2x DGX Spark, TP=2, NVFP4, NEXTN speculation, thinking off.
 
-**Single stream:** ~43 tok/s at 24k context, ~39 tok/s at 84k — decode stays
+**Single stream:** ~43 tok/s at 24k context, ~39 tok/s at 84k - decode stays
 remarkably flat with depth.
 
 **Real agent workload** (coding agent, tool calls, 100k+ context): ran to natural
@@ -384,13 +384,13 @@ completion, produced a complete tested feature, full repo suite green
 | 16 | 148.62s | 256.34s | **70%** | 107.59s | **KV cliff** |
 
 The cliff is arithmetic, not a defect: KV is sized at 1,160,832 tokens, and
-1,160,832 / 70,000 ≈ 16. TTFT is the tell — p95 goes from 2.2s to 107s, and prefix
+1,160,832 / 70,000 ≈ 16. TTFT is the tell - p95 goes from 2.2s to 107s, and prefix
 cache-hit drops to 0%, i.e. sessions lose their cached prefix and re-prefill from
 scratch. It degrades into thrashing, gracefully, without corrupting: the canary
 still passes and no output is malformed.
 
 Divide your KV token count by your working context to predict the wall. To move it,
-raise KV — not the mamba pool.
+raise KV - not the mamba pool.
 
 **Watch p50 with suspicion.** From 8 to 10 sessions p50 is flat (5.89 → 5.91)
 while p90 nearly doubles (13.57 → 23.16) and turns over 30s go 3% → 8%. A p50-keyed
