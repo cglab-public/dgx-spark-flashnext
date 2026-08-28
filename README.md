@@ -253,10 +253,13 @@ Do not assume a `!` run means the sparse-decode problem above. There are two:
 | fix | working sparse-decode kernel (§3) | none upstream; disable thinking for those sessions |
 
 Both drop spec accept rate to 0.00 and both emit token 0, so the symptom is
-identical. We had a field incident that matched *both* sets of conditions at once
-and initially attributed it entirely to depth. Credit to
+identical and you cannot tell them apart from the reply alone. Credit to
 [MiaAI-Lab](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks) for
-documenting #36537 — their README is the reason we separated the two.
+documenting #36537 — their README is the reason we knew to separate the two.
+
+To tell them apart, check the session transcript for reasoning content. Our field
+incident carried **none** across 147 assistant turns, so thinking was off and only
+the depth trigger applied.
 
 Workaround for #36537, per request (keeps thinking elsewhere):
 
@@ -264,11 +267,11 @@ Workaround for #36537, per request (keeps thinking elsewhere):
 "chat_template_kwargs": {"enable_thinking": false}
 ```
 
-**Check what your client actually sends.** Ours passed
-`chat_template_kwargs {"thinking": false}` — the template reads `enable_thinking`,
-unknown keys are silently ignored, so thinking stayed **on** and every tool-using
-agent session sat on the #36537 trigger without anyone intending it. A key
-typo here fails silently in the direction of the bug.
+**Check what your client actually sends.** The template reads `enable_thinking`
+and silently ignores any other spelling — a client passing `thinking` instead
+leaves thinking **on** (this model thinks by default) and puts tool-using sessions
+onto #36537 without warning. The failure mode of a key typo here is silent, and in
+the direction of the bug.
 
 ### Zero-token replies at the context ceiling
 
