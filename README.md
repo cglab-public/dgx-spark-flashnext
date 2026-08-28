@@ -4,10 +4,34 @@ Field notes from getting `Qwen3.8-Flash-Next` serving correctly on a pair of
 NVIDIA DGX Sparks (GB10, sm_121) with SGLang, TP=2.
 
 **The short version:** the vendor recipe boots on GB10 and then silently produces
-garbage past a certain context depth. The fix is one flag. The rest of this
-document is how we found that, and the traps between here and there — because the
-failure is silent, and every obvious way of checking for it will tell you the
-server is fine.
+garbage past a certain context depth. The fix is a working sparse-decode kernel;
+no combination of stock flags is sufficient. The rest of this document is how we
+found that, and the traps between here and there — because the failure is silent,
+and every obvious way of checking for it will tell you the server is fine.
+
+> ### Correction — 2026-08-28
+>
+> **An earlier version of this document said `--attention-backend flashinfer`
+> alone was sufficient for correctness. That was wrong.** The flag is necessary
+> but it does not remove QSA from the path: the boot log still reads
+> `Using QSA for sparse full-attention layers`, because the flag only swaps the
+> dense backend that QSA *wraps*. With the trtllm-gen gate patch still in place —
+> which that version also told you to apply, in order to boot at all — the
+> silently-wrong sparse decode remains live, and the `!!!!` collapse returns at
+> depth.
+>
+> We missed it because the failure is **stochastic and depth-dependent**, and
+> every rung of our matrix was n=1. Re-measured with repeats:
+>
+> | context depth | collapse rate (flag-only "fix") |
+> |---|---|
+> | 120k | 1/4 |
+> | 160k | 1/4 |
+> | 190k | 2/4 |
+> | 210k | **4/4** |
+>
+> 120k is well inside ordinary agent use, so capping context is not a mitigation.
+> See §3 for what actually fixes it.
 
 > Hardware here is 2x DGX Spark (GB10, 128 GB unified each) linked over their
 > high-speed fabric, TP=2, `nnodes=2`. Single-Spark users should still care about
@@ -80,10 +104,10 @@ not engaged at that length.
 
 Related upstream: sgl-project/sglang#36558.
 
-Note the gate patch is still **required to boot at all**, even with QSA bypassed by
-`--attention-backend` — the decode resolver is reached during startup regardless.
-So on GB10 today you need both: the patch to boot, and the attention backend to be
-correct.
+We previously wrote that the gate patch is "required to boot at all". That is true
+only if the *other* path is left broken. Repair the FA4-CuTe fallback instead (§3)
+and the server boots with the gate untouched — which is the cleanest evidence that
+forcing it open was never necessary, only convenient.
 
 ### What does not work
 
@@ -96,18 +120,48 @@ blocker, but something else in the path is. Avoid it here.
 
 ## 3. The fix
 
-**Bypass QSA globally.** Not just decode:
+**Replace the sparse-decode kernel. Do not force the trtllm-gen gate open.**
 
-```
---attention-backend flashinfer
-```
+The two stock paths both fail (§2), so the real fix is to repair the *intended*
+fallback rather than un-gate the one NVIDIA disabled. MiaAI-Lab did exactly this:
+they leave `is_sm100_supported()` gated off and give
+`_resolve_flash_attn_varlen_func` a Triton varlen kernel that works on GB10.
 
-The distinction matters. `--decode-attention-backend flashinfer` overrides decode
+> **Credit:** the kernel fix is theirs, not ours —
+> <https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks>
+
+Measured here at 210k context, NEXTN on, every other flag identical — the image is
+the only variable:
+
+| sparse decode | result at 210k | accept rate | decode |
+|---|---|---|---|
+| forced trtllm-gen + `--attention-backend flashinfer` | **4/4 collapse** | 0.72 | 43.2 tok/s |
+| MiaAI-Lab Triton fallback | **6/6 clean** | 0.90 | **57.5 tok/s** |
+
+It is correct *and* faster: a correct kernel drafts correctly, so the speculative
+accept rate rises from 0.72 to 0.90. Their image also boots **without** the gate
+patch, which stock cannot — direct confirmation that the fallback path is genuinely
+repaired rather than bypassed.
+
+### Still keep `--attention-backend flashinfer`
+
+It remains necessary — `--decode-attention-backend flashinfer` overrides decode
 only and leaves **prefill on QSA**; that configuration passes short probes and then
-degrades in real use. Use the global flag.
+degrades in real use. Use the global flag. It is just no longer *sufficient*.
 
-That flag alone is sufficient for correctness — verified by bisect, with every
-other flag at stock. Nothing else is needed.
+### What we tried that did NOT fix it
+
+Recorded so nobody repeats them. All still collapse at 210k:
+
+| attempt | result |
+|---|---|
+| `TL_DISABLE_WARP_SPECIALIZED` on the racy QSA decode kernel | 2/6 collapse |
+| disabling QSA MTP IndexShare (`index_share_for_mtp_iteration`) | 3/6 collapse |
+| `--chunked-prefill-size 1024` | still collapses |
+| `--speculative-algorithm none` | clean, but costs 2.5x decode (43 -> 17.5 tok/s) |
+
+Note the TileLang boot-time warning `Data race detected: Logits(bx, position)` is a
+red herring — it is present on healthy and collapsing builds alike.
 
 ### Do not add `--mamba-full-memory-ratio`
 
@@ -130,6 +184,11 @@ size for whichever pool binds first — for this model that is KV.
 
 ### Working configuration
 
+Run it on an image carrying the Triton QSA fallback (§3) — build it from the
+MiaAI-Lab recipe. On the stock image this same command still collapses at depth.
+Do **not** also bind-mount a trtllm-gate patch: it overwrites the very file the
+fix patches and puts the broken kernel back.
+
 ```bash
 python3 -m sglang.launch_server \
   --model-path <ORG>/Qwen3.8-Flash-Next-NVFP4 \
@@ -143,10 +202,11 @@ python3 -m sglang.launch_server \
   --page-size 64 \
   --mamba-scheduler-strategy extra_buffer \
   --mamba-track-interval 64 \
-  --chunked-prefill-size 4096 \
+  --chunked-prefill-size 1024 \
+  --max-prefill-tokens 2048 \
   --max-running-requests 16 \
   --context-length 262144 \
-  --mem-fraction-static 0.90 \
+  --mem-fraction-static 0.82 \
   --allow-auto-truncate \
   --speculative-algorithm NEXTN \
   --speculative-num-steps 3 \
@@ -162,9 +222,61 @@ Pin NCCL/GLOO to the fast interface (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`)
 on the management path we measured 5 MB/s and the model will not load in any
 reasonable time.
 
+### Why chunk 1024 and fraction 0.82, not 4096 / 0.90
+
+The QSA indexer allocates an `fp32 [chunk_size x history_length]` logits matrix
+per sparse layer per chunk, plus gather/topk copies. At chunk 4096 and ~240k
+history that transient is **~8-10 GB**. With `--mem-fraction-static 0.90` we had
+8.9 GB free and saw **2/6 collapse at 240k** even on the fixed kernel; at 0.82
+(17.9 GB free) with chunk 1024 the same test is **6/6 clean**.
+
+This diagnosis is MiaAI-Lab's — see "the QSA indexer prefill workspace scales with
+`chunk x history`" in their README. Do not raise chunk without profiling the peak
+transient against your free budget.
+
+It is not free. KV drops **1,209,792 -> 708,288 tokens** (~17 -> ~10 concurrent
+sessions at 70k each), and deep prefill roughly doubles (~100s -> ~165s at 240k).
+We took that trade deliberately: a correct answer slowly beats `!!!!` quickly.
+
 ---
 
 ## 4. Other GB10 traps
+
+### There is a SECOND `!!!!` bug, with a different trigger
+
+Do not assume a `!` run means the sparse-decode problem above. There are two:
+
+| | this document's bug | [sglang#36537](https://github.com/sgl-project/sglang/issues/36537) |
+|---|---|---|
+| trigger | context depth (>=120k), stochastic | thinking ON **+** `tools` in the request **+** `--tool-call-parser qwen3_coder` |
+| reproduces with thinking off | **yes** | no |
+| fix | working sparse-decode kernel (§3) | none upstream; disable thinking for those sessions |
+
+Both drop spec accept rate to 0.00 and both emit token 0, so the symptom is
+identical. We had a field incident that matched *both* sets of conditions at once
+and initially attributed it entirely to depth. Credit to
+[MiaAI-Lab](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks) for
+documenting #36537 — their README is the reason we separated the two.
+
+Workaround for #36537, per request (keeps thinking elsewhere):
+
+```json
+"chat_template_kwargs": {"enable_thinking": false}
+```
+
+**Check what your client actually sends.** Ours passed
+`chat_template_kwargs {"thinking": false}` — the template reads `enable_thinking`,
+unknown keys are silently ignored, so thinking stayed **on** and every tool-using
+agent session sat on the #36537 trigger without anyone intending it. A key
+typo here fails silently in the direction of the bug.
+
+### Zero-token replies at the context ceiling
+
+With `--allow-auto-truncate`, a prompt that fills the window returns
+`finish_reason: "length"` with **`completion_tokens: 0`** and empty content — no
+error, no warning. Clients render it as a blank reply. If you do not need
+truncation, leave the flag off so oversized prompts fail loudly instead.
+
 
 **`--moe-runner-backend` must be set explicitly.** `auto` resolves to
 `flashinfer_trtllm` here and raises `NotImplementedError: Unsupported
@@ -221,6 +333,18 @@ Two failure modes it catches that ordinary checks do not:
 - `content: ""` with a populated `reasoning_content` — looks like an empty reply,
   not an error
 - a server that was healthy when you started the run and degraded during it
+
+> **But know what it cannot see.** These prompts are short, and the sparse-decode
+> collapse is depth-dependent. We have watched this canary pass three for three
+> while the same server collapsed on **100%** of 210k-context requests. A green
+> canary means "not globally wedged"; it says nothing about depth. Probe at the
+> depth your workload actually reaches, and **repeat it** — see below.
+
+**One sample per configuration is not a measurement.** The collapse is a
+stochastic failure: at 190k it fires on roughly half of attempts, so a single
+clean run is a coin flip you will read as a pass. This is precisely how the
+earlier version of this document shipped a broken recommendation — every rung of
+the matrix was n=1. Use n>=6 per cell and report the rate, not a verdict.
 
 **Probe shape matters more than probe depth.** A single-shot cold prefill and a
 multi-turn short extend on a cached prefix exercise different paths and fail at
