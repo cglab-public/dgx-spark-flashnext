@@ -9,6 +9,41 @@ no combination of stock flags is sufficient. The rest of this document is how we
 found that, and the traps between here and there - because the failure is silent,
 and every obvious way of checking for it will tell you the server is fine.
 
+> ### Status - 2026-09-02: read this before following the recipe
+>
+> **Official SGLang support is still unmerged.**
+> [sgl-project/sglang#36497](https://github.com/sgl-project/sglang/pull/36497)
+> ("Introduce Qwen 3.8 Flash Next") has been open since 2026-08-26, and it is where
+> every sm_121 fix cited below actually lives: #36649, #36806 and #36845 are commits
+> on *its* branch, not independent merges. There is no released SGLang with this
+> model supported.
+>
+> **The kernel this document credits is no longer obtainable where it points.**
+> MiaAI-Lab replaced their SGLang deployment with a vLLM bring-up on 2026-08-31 and
+> rewrote the repository's history: it is now six commits containing no QSA, varlen
+> or SGLang files at all. Take the kernel from the #36497 branch instead. Be aware
+> the branch carries a *different* implementation under the same PR number - a
+> hand-optimized CUDA kernel at `kernels/kda_kernels/qwen38_qsa_sm121/`, reported at
+> 2.07x over the Triton fallback and validated against it as the correctness
+> reference. **Everything measured in §3 below is the Triton fallback.** We have not
+> run the CUDA one.
+>
+> **An independent operator on this exact topology has withdrawn their recipe.**
+> `hellojiaru` evaluated 2-node TP2 on GB10 and reported (2026-08-31, in #36497)
+> that the NVFP4 + QSA + NEXTN/EAGLE + ReplaySSM stack stayed unstable across
+> repeated multi-turn long-prefill-to-decode transitions *even with CUDA Graph and
+> overlap scheduling disabled* - invalid sampling probabilities on both ranks,
+> device-side assert, Xid 43, NCCL termination, at ~29k and ~50.6k context with one
+> running request. They place the failure in the long re-prefill / speculative state
+> path rather than any single kernel. See also #37052 and #37111.
+>
+> **We are no longer serving this stack.** After a fourth silent collapse in two
+> days we migrated to vLLM on 2026-09-01. Our reading, and `hellojiaru`'s
+> independently, is that the sparse-decode kernel was necessary but not the whole
+> cause: our own collapse recurred on an image carrying a QSA kernel upstream
+> considers correct. The notes below stand exactly as measured, but they are field
+> notes on a configuration we have stopped running.
+
 > ### Correction - 2026-08-28
 >
 > **An earlier version of this document said `--attention-backend flashinfer`
@@ -129,6 +164,12 @@ they leave `is_sm100_supported()` gated off and give
 
 > **Credit:** the kernel fix is theirs, not ours -
 > <https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks>
+>
+> **Dead link warning (2026-09-02):** that repository no longer carries it. It was
+> rewritten on 2026-08-31 for a vLLM bring-up and now holds no QSA or SGLang files.
+> The upstream equivalent is the #36497 branch - which since 2026-08-30 ships a
+> CUDA kernel in place of the Triton one measured here. See the status note at the
+> top.
 
 Measured here at 210k context, NEXTN on, every other flag identical - the image is
 the only variable:
@@ -184,8 +225,9 @@ size for whichever pool binds first - for this model that is KV.
 
 ### Working configuration
 
-Run it on an image carrying the Triton QSA fallback (§3) - build it from the
-MiaAI-Lab recipe. On the stock image this same command still collapses at depth.
+Run it on an image carrying a repaired QSA fallback (§3). The image measured here
+was built from the MiaAI-Lab recipe, which no longer exists; build from the #36497
+branch instead. On the stock image this same command still collapses at depth.
 Do **not** also bind-mount a trtllm-gate patch: it overwrites the very file the
 fix patches and puts the broken kernel back.
 
